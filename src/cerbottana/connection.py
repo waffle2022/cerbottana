@@ -17,7 +17,7 @@ from cerbottana.models.protocol_message import ProtocolMessage
 from cerbottana.models.room import Room
 from cerbottana.models.user import User
 from cerbottana.plugins import Command, commands
-from cerbottana.tasks import init_tasks, recurring_tasks
+from cerbottana.tasks import background_tasks, init_tasks
 from cerbottana.typedefs import RoomId
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ class Connection:
         self.webhooks = {utils.to_room_id(room): url for room, url in webhooks.items()}
         self.public_roomids: set[str] = set()
         self.init_tasks = init_tasks
-        self.recurring_tasks = recurring_tasks
+        self.background_tasks = background_tasks
         self.handlers = handlers
         self.commands = commands
         self.active_commands: dict[Room | User, dict[asyncio.Task[None], Command]] = (
@@ -63,7 +63,7 @@ class Connection:
         self.websocket: aiohttp.ClientWebSocketResponse | None = None
         self.connection_start: float | None = None
         self.tiers: dict[str, Tier] = {}
-        self.background_tasks: set[asyncio.Task[Any]] = set()  # type: ignore[explicit-any]
+        self.running_tasks: set[asyncio.Task[Any]] = set()  # type: ignore[explicit-any]
 
     async def open_connection(self) -> None:
         signal.signal(signal.SIGTERM, signal.getsignal(signal.SIGINT))
@@ -73,7 +73,7 @@ class Connection:
             pass
 
     async def _start_websocket(self) -> None:
-        await self._run_init_recurring_tasks()
+        await self._run_init_background_tasks()
 
         async with aiohttp.ClientSession() as session:
             connection_retries = 0
@@ -96,7 +96,7 @@ class Connection:
                 except (aiohttp.ClientConnectionError, ConnectionResetError):
                     pass
 
-                for task in self.background_tasks:
+                for task in self.running_tasks:
                     task.cancel()
 
                 if (
@@ -115,7 +115,7 @@ class Connection:
                 print(f"Connection closed, retrying in {backoff} seconds")
                 await asyncio.sleep(backoff)
 
-    async def _run_init_recurring_tasks(self) -> None:
+    async def _run_init_background_tasks(self) -> None:
         for prio in range(1, 6):
             async with asyncio.TaskGroup() as tg:
                 for task_prio, func in self.init_tasks:
@@ -123,7 +123,7 @@ class Connection:
                         continue
                     tg.create_task(func(self))
 
-        for rtask in self.recurring_tasks:
+        for rtask in self.background_tasks:
             self.create_task(rtask(self))
 
     async def _parse_text_message(self, message: str) -> None:
@@ -190,6 +190,6 @@ class Connection:
         context: Context | None = None,
     ) -> asyncio.Task[T]:
         task = asyncio.create_task(coro, name=name, context=context)
-        self.background_tasks.add(task)
-        task.add_done_callback(self.background_tasks.discard)
+        self.running_tasks.add(task)
+        task.add_done_callback(self.running_tasks.discard)
         return task
